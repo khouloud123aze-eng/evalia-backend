@@ -1,0 +1,285 @@
+# main.py
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List, Dict
+import openai
+import os
+from enum import Enum
+
+app = FastAPI(title="API IA Éducative", version="1.0.0")
+
+# Configuration CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configuration OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# ============= MODÈLES DE DONNÉES =============
+
+class TypeErreur(str, Enum):
+    CONCEPTUELLE = "conceptuelle"
+    LOGIQUE = "logique"
+    LEXICALE = "lexicale"
+    AUCUNE = "aucune"
+
+class ReponseEleve(BaseModel):
+    question_id: str
+    question_texte: str
+    reponse_eleve: str
+    contexte_pedagogique: Optional[str] = None
+    theme: str = "politiques_logement"
+
+class AnalyseErreur(BaseModel):
+    type_erreur: TypeErreur
+    sous_categorie: Optional[str] = None
+    description: str
+    gravite: str  # "mineure", "moyenne", "majeure"
+
+class Feedback(BaseModel):
+    est_correct: bool
+    score: Optional[int] = None  # sur 10 ou 20 selon besoin
+    erreurs_detectees: List[AnalyseErreur]
+    feedback_general: str
+    points_forts: List[str]
+    axes_amelioration: List[str]
+
+class Remediation(BaseModel):
+    ressources_suggerees: List[str]
+    exercices_complementaires: List[str]
+    focus_pedagogique: str
+
+class ResultatCorrection(BaseModel):
+    feedback: Feedback
+    remediation: Remediation
+    metadata: Dict
+
+# ============= CONFIGURATION THÉMATIQUE =============
+
+THEMES_CONFIG = {
+    "politiques_logement": {
+        "titre": "Politiques publiques du logement - BTS SP3S",
+        "concepts_cles": [
+            "logement social vs hébergement d'urgence",
+            "FSL (Fonds de Solidarité Logement)",
+            "DALO (Droit Au Logement Opposable)",
+            "bailleurs sociaux (HLM, offices publics)",
+            "collectivités territoriales (rôle et compétences)",
+            "demande de logement social (numéro unique)",
+            "critères d'attribution (revenus, situation familiale)",
+            "mixité sociale et politique de la ville"
+        ],
+        "erreurs_frequentes": {
+            "conceptuelle": [
+                "confusion logement social / hébergement",
+                "confusion FSL / DALO",
+                "rôle des bailleurs vs collectivités mal compris",
+                "critères d'attribution du logement social"
+            ],
+            "logique": [
+                "généralisation abusive (ex: 'tout le monde peut avoir un logement social')",
+                "causalité inversée ou absente",
+                "solutions proposées inadaptées au problème",
+                "absence de lien problème-dispositif"
+            ],
+            "lexicale": [
+                "'maison sociale' au lieu de 'logement social'",
+                "'la mairie donne des logements' (imprécision acteur)",
+                "confusion des sigles (FSL/DALO/PDALHPD)",
+                "vocabulaire non professionnel"
+            ]
+        },
+        "vocabulaire_attendu": [
+            "logement social", "bailleur social", "demande de logement",
+            "commission d'attribution", "FSL", "DALO", "hébergement d'urgence",
+            "mixité sociale", "politique de la ville", "PDALHPD"
+        ]
+    }
+}
+
+# ============= SYSTÈME D'ANALYSE IA =============
+
+class AnalyseurIA:
+    def __init__(self, provider="openai"):
+        self.provider = provider
+        
+    def _construire_prompt_analyse(self, data: ReponseEleve) -> str:
+        """Construit le prompt d'analyse selon le thème"""
+        theme_config = THEMES_CONFIG.get(data.theme, {})
+        
+        prompt = f"""Tu es un expert en pédagogie et en évaluation des compétences pour le BTS SP3S.
+
+THÈME : {theme_config.get('titre', data.theme)}
+
+CONCEPTS CLÉS À MAÎTRISER :
+{chr(10).join(f"- {c}" for c in theme_config.get('concepts_cles', []))}
+
+VOCABULAIRE PROFESSIONNEL ATTENDU :
+{', '.join(theme_config.get('vocabulaire_attendu', []))}
+
+QUESTION POSÉE :
+{data.question_texte}
+
+RÉPONSE DE L'ÉTUDIANT :
+{data.reponse_eleve}
+
+TAXONOMIE DES ERREURS :
+
+1. ERREURS CONCEPTUELLES (confusion de notions, mauvaise compréhension des dispositifs)
+   Exemples fréquents : {', '.join(theme_config.get('erreurs_frequentes', {}).get('conceptuelle', []))}
+
+2. ERREURS LOGIQUES (raisonnement bancal, généralisation abusive, absence de lien cause-effet)
+   Exemples fréquents : {', '.join(theme_config.get('erreurs_frequentes', {}).get('logique', []))}
+
+3. ERREURS LEXICALES (vocabulaire imprécis, non professionnel, confusion de sigles)
+   Exemples fréquents : {', '.join(theme_config.get('erreurs_frequentes', {}).get('lexicale', []))}
+
+ANALYSE DEMANDÉE :
+
+Analyse la réponse de l'étudiant et fournis un retour structuré au format JSON suivant :
+
+{{
+    "est_correct": true/false,
+    "score": <note sur 20>,
+    "erreurs": [
+        {{
+            "type": "conceptuelle|logique|lexicale",
+            "sous_categorie": "précision de l'erreur",
+            "description": "description détaillée",
+            "gravite": "mineure|moyenne|majeure",
+            "extrait": "partie de la réponse concernée"
+        }}
+    ],
+    "points_forts": ["point fort 1", "point fort 2"],
+    "axes_amelioration": ["axe 1", "axe 2"],
+    "feedback_general": "feedback bienveillant et constructif",
+    "remediation": {{
+        "ressources": ["ressource 1", "ressource 2"],
+        "exercices": ["exercice 1", "exercice 2"],
+        "focus": "ce sur quoi l'étudiant doit se concentrer en priorité"
+    }}
+}}
+
+IMPORTANT :
+- Sois bienveillant mais précis
+- Valorise les points positifs même dans une réponse faible
+- Fournis des pistes concrètes d'amélioration
+- Adapte le niveau d'exigence au contexte BTS SP3S
+"""
+        return prompt
+
+    async def analyser_reponse(self, data: ReponseEleve) -> ResultatCorrection:
+        """Analyse une réponse via l'API IA"""
+        try:
+            prompt = self._construire_prompt_analyse(data)
+            
+            # Appel OpenAI
+            response = openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Tu es un évaluateur pédagogique expert. Tu réponds UNIQUEMENT en JSON valide."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                response_format={"type": "json_object"}
+            )
+            
+            resultat = response.choices[0].message.content
+            import json
+            data_json = json.loads(resultat)
+            
+            # Construction du résultat structuré
+            erreurs_detectees = [
+                AnalyseErreur(
+                    type_erreur=TypeErreur(err.get("type", "aucune")),
+                    sous_categorie=err.get("sous_categorie"),
+                    description=err.get("description", ""),
+                    gravite=err.get("gravite", "moyenne")
+                )
+                for err in data_json.get("erreurs", [])
+            ]
+            
+            feedback = Feedback(
+                est_correct=data_json.get("est_correct", False),
+                score=data_json.get("score"),
+                erreurs_detectees=erreurs_detectees,
+                feedback_general=data_json.get("feedback_general", ""),
+                points_forts=data_json.get("points_forts", []),
+                axes_amelioration=data_json.get("axes_amelioration", [])
+            )
+            
+            remediation_data = data_json.get("remediation", {})
+            remediation = Remediation(
+                ressources_suggerees=remediation_data.get("ressources", []),
+                exercices_complementaires=remediation_data.get("exercices", []),
+                focus_pedagogique=remediation_data.get("focus", "")
+            )
+            
+            return ResultatCorrection(
+                feedback=feedback,
+                remediation=remediation,
+                metadata={
+                    "theme": data.theme,
+                    "question_id": data.question_id,
+                    "modele_utilise": "gpt-4o-mini",
+                    "tokens_utilises": response.usage.total_tokens
+                }
+            )
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse : {str(e)}")
+
+# ============= ROUTES API =============
+
+analyseur = AnalyseurIA()
+
+@app.get("/")
+async def root():
+    return {
+        "message": "API IA Éducative - BTS SP3S",
+        "version": "1.0.0",
+        "endpoints": ["/corriger", "/themes", "/health"]
+    }
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "service": "education-ai-backend"}
+
+@app.get("/themes")
+async def lister_themes():
+    """Liste les thèmes disponibles"""
+    return {
+        "themes": [
+            {
+                "id": theme_id,
+                "titre": config["titre"],
+                "nb_concepts": len(config.get("concepts_cles", []))
+            }
+            for theme_id, config in THEMES_CONFIG.items()
+        ]
+    }
+
+@app.post("/corriger", response_model=ResultatCorrection)
+async def corriger_reponse(data: ReponseEleve):
+    """
+    Analyse une réponse d'étudiant et renvoie :
+    - Le feedback détaillé (correct/incorrect, type d'erreur, etc.)
+    - Les pistes de remédiation personnalisées
+    """
+    if data.theme not in THEMES_CONFIG:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Thème '{data.theme}' non reconnu. Thèmes disponibles : {list(THEMES_CONFIG.keys())}"
+        )
+    
+    resultat = await analyseur.analyser_reponse(data)
+    return resultat
+
+# Pour lancer le serveur : uvicorn main:app --reload
+# Puis tester avec : curl -X POST "http://localhost:8000/corriger" -H "Content-Type: application/json" -d '{"question_id":"Q1","question_texte":"Différence entre logement social et hébergement?","reponse_eleve":"La mairie donne des maisons","theme":"politiques_logement"}'
